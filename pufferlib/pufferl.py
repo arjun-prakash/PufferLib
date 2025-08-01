@@ -45,6 +45,8 @@ rich.traceback.install(show_locals=False)
 import signal # Aggressively exit on ctrl+c
 signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
 
+os.environ["SDL_VIDEODRIVER"] = "dummy" 
+
 # Assume advantage kernel has been built if CUDA compiler is available
 ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
@@ -981,9 +983,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         ob = vecenv.step(action)[0]
 
         if len(frames) > 0 and len(frames) == args['save_frames']:
-            import imageio
-            imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
+            # import imageio
+            # print(frames)
+            # imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
             frames.append('Done')
+            break
 
 def sweep(args=None, env_name=None):
     args = args or load_config(env_name)

@@ -14,6 +14,10 @@
 #include "dronelib.h"
 
 typedef struct Client Client;
+
+#define DUMP_FRAMES 1
+#define MAX_DUMP_FRAMES 300 
+
 struct Client {
     Camera3D camera;
     float width;
@@ -285,7 +289,8 @@ Client *make_client(DroneRace *env) {
     client->width = WIDTH;
     client->height = HEIGHT;
 
-    SetConfigFlags(FLAG_MSAA_4X_HINT); // antialiasing
+    //SetConfigFlags(FLAG_MSAA_4X_HINT); // antialiasing
+    SetConfigFlags(FLAG_WINDOW_UNDECORATED);
     InitWindow(WIDTH, HEIGHT, "PufferLib DroneRace");
 
 #ifndef __EMSCRIPTEN__
@@ -463,4 +468,17 @@ void c_render(DroneRace *env) {
     DrawText("Mouse wheel: Zoom in/out", 10, 295, 16, LIGHTGRAY);
 
     EndDrawing();
+
+
+    #if DUMP_FRAMES
+    static int frame_counter = 0;
+    if (frame_counter < MAX_DUMP_FRAMES) {
+        char fname[256];
+        sprintf(fname, "frame_%06d.png", frame_counter);
+        TakeScreenshot(fname);  // directly writes the PNG of the current framebuffer
+        frame_counter++;
+    }
+    #endif
+
+
 }
