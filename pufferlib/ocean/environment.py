@@ -133,6 +133,7 @@ MAKE_FUNCTIONS = {
     'drone_crazyflie': 'DroneCrazyflie',
     'drone_race': 'DroneRace',
     'drone_swarm': 'DroneSwarm',
+    'drone_pe': 'DronePE',
     'nmmo3': 'NMMO3',
     'snake': 'Snake',
     'squared': 'Squared',

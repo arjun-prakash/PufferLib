@@ -21,10 +21,10 @@ cleanup() {
 trap cleanup EXIT
 
 # Run eval (this will produce frame_*.png via TakeScreenshot)
-python -m pufferlib.pufferl eval puffer_drone_crazyflie \
+python -m pufferlib.pufferl eval puffer_drone_pe \
   --load-model-path latest \
   --gif-path dummy.gif \
-  --render-mode human --save-frames 100
+  --render-mode human --save-frames 200
 
 # Assemble GIF at higher resolution (assuming frame_*.png are large already)
 ffmpeg -framerate ${VIDEO_FPS} -i frame_%06d.png -vf "scale=1920:-1:flags=lanczos,palettegen" palette.png
