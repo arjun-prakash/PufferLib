@@ -5,6 +5,10 @@
 
 static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->num_agents = unpack(kwargs, "num_agents");
+    env->num_pursuers = unpack(kwargs, "num_pursuers");
+    env->evader_speed = unpack(kwargs, "evader_speed");
+    env->pursuer_speed = unpack(kwargs, "pursuer_speed");
+    env->turning_angle_deg = unpack(kwargs, "turning_angle_deg");
     init(env);
     return 0;
 }

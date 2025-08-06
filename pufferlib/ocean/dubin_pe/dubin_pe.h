@@ -49,7 +49,13 @@ typedef struct {
 
     int task;
     int num_agents;
+    int num_pursuers;
     DubinsCar* agents;
+
+    // Configuration parameters
+    float evader_speed;
+    float pursuer_speed;
+    float turning_angle_deg;
 
     Client *client;
 } DubinPE;
@@ -58,6 +64,12 @@ void init(DubinPE *env) {
     env->agents = calloc(env->num_agents, sizeof(DubinsCar));
     env->log = (Log){0};
     env->tick = 0;
+    
+    // Set default values if not already set
+    if (env->num_pursuers == 0) env->num_pursuers = env->num_agents - 1; // Default: all except first are pursuers
+    if (env->evader_speed == 0.0f) env->evader_speed = DEFAULT_SPEED_EVADER;
+    if (env->pursuer_speed == 0.0f) env->pursuer_speed = DEFAULT_SPEED_PURSUER;
+    if (env->turning_angle_deg == 0.0f) env->turning_angle_deg = DEFAULT_TURN_ANGLE * 180.0f / PI;
 }
 
 void add_log(DubinPE *env, int idx, bool oob) {
@@ -301,6 +313,7 @@ void reset_agent(DubinPE* env, DubinsCar *agent, int idx) {
     agent->score = 0.0f;
     
     // Determine if this is an evader (first agent) or pursuer
+    // First agent is always evader, rest are pursuers
     bool is_evader = (idx == 0);
     
     // Intelligent spawning with minimum distance requirements
@@ -358,7 +371,7 @@ void reset_agent(DubinPE* env, DubinsCar *agent, int idx) {
     agent->spawn_pos = agent->pos;
     agent->heading = rndf(0, 2.0f * PI);
 
-    init_dubins_car(agent, is_evader);
+    init_dubins_car(agent, is_evader, env->evader_speed, env->pursuer_speed);
     compute_reward(env, agent, false); // Start without collision checking
 }
 
@@ -383,7 +396,8 @@ void c_step(DubinPE *env) {
         env->terminals[i] = 0;
 
         int action = env->actions[i];
-        move_dubins_car(agent, action);
+        float turn_angle_rad = env->turning_angle_deg * PI / 180.0f;
+        move_dubins_car(agent, action, turn_angle_rad);
 
         // check out of bounds
         bool out_of_bounds = agent->pos.x < -GRID_X || agent->pos.x > GRID_X ||

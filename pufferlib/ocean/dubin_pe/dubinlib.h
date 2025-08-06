@@ -17,10 +17,10 @@
 #define TRAIL_LENGTH 50
 #define HORIZON 1024
 
-// Physical constants for Dubins cars
-#define BASE_SPEED_EVADER 1.0f        // Evader speed (slower)
-#define BASE_SPEED_PURSUER 1.3f       // Pursuer speed (faster)
-#define TURN_ANGLE (30.0f * PI / 180.0f)  // 30 degrees in radians
+// Default physical constants for Dubins cars (can be overridden)
+#define DEFAULT_SPEED_EVADER 2.5f        // Evader speed (slower)
+#define DEFAULT_SPEED_PURSUER 3.2f       // Pursuer speed (faster)
+#define DEFAULT_TURN_ANGLE (30.0f * PI / 180.0f)  // 30 degrees in radians
 #define PI 3.14159265358979323846f
 
 // Simulation properties
@@ -122,21 +122,21 @@ typedef struct {
     float max_speed;    // maximum speed
 } DubinsCar;
 
-void init_dubins_car(DubinsCar* car, bool is_evader) {
+void init_dubins_car(DubinsCar* car, bool is_evader, float evader_speed, float pursuer_speed) {
     car->is_evader = is_evader;
     
     if (is_evader) {
-        car->max_speed = BASE_SPEED_EVADER;
-        car->speed = BASE_SPEED_EVADER;
+        car->max_speed = evader_speed;
+        car->speed = evader_speed;
     } else {
-        car->max_speed = BASE_SPEED_PURSUER;
-        car->speed = BASE_SPEED_PURSUER;
+        car->max_speed = pursuer_speed;
+        car->speed = pursuer_speed;
     }
     
     car->heading = 0.0f;
 }
 
-void move_dubins_car(DubinsCar* car, int action) {
+void move_dubins_car(DubinsCar* car, int action, float turn_angle) {
     // Actions: 0 = turn left, 1 = straight, 2 = turn right
     // Clamp action to valid range
     if (action < 0) action = 0;
@@ -147,13 +147,13 @@ void move_dubins_car(DubinsCar* car, int action) {
     // Update heading based on action
     switch (action) {
         case 0: // Turn left
-            car->heading += TURN_ANGLE;
+            car->heading += turn_angle;
             break;
         case 1: // Go straight
             // No heading change
             break;
         case 2: // Turn right
-            car->heading -= TURN_ANGLE;
+            car->heading -= turn_angle;
             break;
     }
     
