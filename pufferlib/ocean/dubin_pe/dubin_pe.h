@@ -1,6 +1,5 @@
-// Originally made by Sam Turner and Finlay Sanders, 2025.
+// Originally adapted from drone implementation by Sam Turner and Finlay Sanders, 2025.
 // Included in pufferlib under the original project's MIT license.
-// https://github.com/stmio/drone
 
 #include <float.h>
 #include <math.h>
@@ -11,13 +10,12 @@
 #include <time.h>
 
 #include "raylib.h"
-#include "dronelib.h"
+#include "dubinlib.h"
 
 #define TASK_PURSUIT_EVASION 0
 #define TASK_N 1
 #define DUMP_FRAMES 1
-#define MAX_DUMP_FRAMES 300 
-#define PI 3.14159265358979323846f
+#define MAX_DUMP_FRAMES 300
 
 char* TASK_NAMES[TASK_N] = {
     "Pursuit-Evasion"
@@ -41,7 +39,7 @@ struct Client {
 
 typedef struct {
     float *observations;
-    float *actions;
+    int *actions;        // Changed to int for discrete actions
     float *rewards;
     unsigned char *terminals;
 
@@ -51,19 +49,19 @@ typedef struct {
 
     int task;
     int num_agents;
-    Drone* agents;
+    DubinsCar* agents;
 
     Client *client;
-} DronePE;
+} DubinPE;
 
-void init(DronePE *env) {
-    env->agents = calloc(env->num_agents, sizeof(Drone));
+void init(DubinPE *env) {
+    env->agents = calloc(env->num_agents, sizeof(DubinsCar));
     env->log = (Log){0};
     env->tick = 0;
 }
 
-void add_log(DronePE *env, int idx, bool oob) {
-    Drone *agent = &env->agents[idx];
+void add_log(DubinPE *env, int idx, bool oob) {
+    DubinsCar *agent = &env->agents[idx];
     env->log.score += agent->score;
     env->log.episode_return += agent->episode_return;
     env->log.episode_length += agent->episode_length;
@@ -78,90 +76,66 @@ void add_log(DronePE *env, int idx, bool oob) {
     agent->episode_return = 0.0f;
 }
 
-Drone* nearest_drone(DronePE* env, Drone *agent) {
+DubinsCar* nearest_car(DubinPE* env, DubinsCar *agent) {
     float min_dist = 999999.0f;
-    Drone *nearest = NULL;
+    DubinsCar *nearest = NULL;
     for (int i = 0; i < env->num_agents; i++) {
-        Drone *other = &env->agents[i];
+        DubinsCar *other = &env->agents[i];
         if (other == agent) {
             continue;
         }
         float dx = agent->pos.x - other->pos.x;
         float dy = agent->pos.y - other->pos.y;
-        float dz = agent->pos.z - other->pos.z;
-        float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+        float dist = sqrtf(dx*dx + dy*dy);
         if (dist < min_dist) {
             min_dist = dist;
             nearest = other;
         }
     }
-    if (nearest == NULL) {
-        int x = 0;
-
-    }
     return nearest;
 }
 
-void compute_observations(DronePE *env) {
+void compute_observations(DubinPE *env) {
     int idx = 0;
     for (int i = 0; i < env->num_agents; i++) {
-        Drone *agent = &env->agents[i];
+        DubinsCar *agent = &env->agents[i];
 
-        Quat q_inv = quat_inverse(agent->quat);
-        Vec3 linear_vel_body = quat_rotate(q_inv, agent->vel);
-        Vec3 drone_up_world = quat_rotate(agent->quat, (Vec3){0.0f, 0.0f, 1.0f});
-
-        // TODO: Need abs observations now right?
-        env->observations[idx++] = linear_vel_body.x / agent->max_vel;
-        env->observations[idx++] = linear_vel_body.y / agent->max_vel;
-        env->observations[idx++] = linear_vel_body.z / agent->max_vel;
-
-        env->observations[idx++] = agent->omega.x / agent->max_omega;
-        env->observations[idx++] = agent->omega.y / agent->max_omega;
-        env->observations[idx++] = agent->omega.z / agent->max_omega;
-
-        env->observations[idx++] = drone_up_world.x;
-        env->observations[idx++] = drone_up_world.y;
-        env->observations[idx++] = drone_up_world.z;
-
-        env->observations[idx++] = agent->quat.w;
-        env->observations[idx++] = agent->quat.x;
-        env->observations[idx++] = agent->quat.y;
-        env->observations[idx++] = agent->quat.z;
-
-        env->observations[idx++] = agent->rpms[0] / agent->max_rpm;
-        env->observations[idx++] = agent->rpms[1] / agent->max_rpm;
-        env->observations[idx++] = agent->rpms[2] / agent->max_rpm;
-        env->observations[idx++] = agent->rpms[3] / agent->max_rpm;
-
+        // Position normalized
         env->observations[idx++] = agent->pos.x / GRID_X;
         env->observations[idx++] = agent->pos.y / GRID_Y;
-        env->observations[idx++] = agent->pos.z / GRID_Z;
 
+        // Heading normalized
+        env->observations[idx++] = agent->heading / PI;
+
+        // Speed normalized
+        env->observations[idx++] = agent->speed / agent->max_speed;
+
+        // Spawn position normalized
         env->observations[idx++] = agent->spawn_pos.x / GRID_X;
         env->observations[idx++] = agent->spawn_pos.y / GRID_Y;
-        env->observations[idx++] = agent->spawn_pos.z / GRID_Z;
 
+        // Target position relative
         float dx = agent->target_pos.x - agent->pos.x;
         float dy = agent->target_pos.y - agent->pos.y;
-        float dz = agent->target_pos.z - agent->pos.z;
         env->observations[idx++] = clampf(dx, -1.0f, 1.0f);
         env->observations[idx++] = clampf(dy, -1.0f, 1.0f);
-        env->observations[idx++] = clampf(dz, -1.0f, 1.0f);
         env->observations[idx++] = dx / GRID_X;
         env->observations[idx++] = dy / GRID_Y;
-        env->observations[idx++] = dz / GRID_Z;
 
+        // Reward history
         env->observations[idx++] = agent->last_collision_reward;
         env->observations[idx++] = agent->last_target_reward;
         env->observations[idx++] = agent->last_abs_reward;
 
-        // Multiagent obs
-        Drone* nearest = nearest_drone(env, agent);
-        if (env->num_agents > 1) {
+        // Agent type
+        env->observations[idx++] = agent->is_evader ? 1.0f : -1.0f;
+
+        // Nearest agent info
+        DubinsCar* nearest = nearest_car(env, agent);
+        if (env->num_agents > 1 && nearest != NULL) {
             env->observations[idx++] = clampf(nearest->pos.x - agent->pos.x, -1.0f, 1.0f);
             env->observations[idx++] = clampf(nearest->pos.y - agent->pos.y, -1.0f, 1.0f);
-            env->observations[idx++] = clampf(nearest->pos.z - agent->pos.z, -1.0f, 1.0f);
+            env->observations[idx++] = nearest->heading / PI;
         } else {
             env->observations[idx++] = 0.0f;
             env->observations[idx++] = 0.0f;
@@ -170,38 +144,31 @@ void compute_observations(DronePE *env) {
     }
 }
 
-void move_target(DronePE* env, Drone *agent) {
+void move_target(DubinPE* env, DubinsCar *agent) {
     agent->target_pos.x += agent->target_vel.x;
     agent->target_pos.y += agent->target_vel.y;
-    agent->target_pos.z += agent->target_vel.z;
     if (agent->target_pos.x < -GRID_X || agent->target_pos.x > GRID_X) {
         agent->target_vel.x = -agent->target_vel.x;
     }
     if (agent->target_pos.y < -GRID_Y || agent->target_pos.y > GRID_Y) {
         agent->target_vel.y = -agent->target_vel.y;
     }
-    if (agent->target_pos.z < -GRID_Z || agent->target_pos.z > GRID_Z) {
-        agent->target_vel.z = -agent->target_vel.z;
-    }
 }
 
-void set_target_pursuit_evasion(DronePE* env, int idx) {
-    Drone* agent = &env->agents[idx];
+void set_target_pursuit_evasion(DubinPE* env, int idx) {
+    DubinsCar* agent = &env->agents[idx];
     
-    if (idx == 0) {
+    if (agent->is_evader) {
         // Evader: try to move away from closest pursuer
-        float max_dist = 0.0f;
-        Vec3 best_escape_pos = agent->pos;
-        
-        // Find the closest pursuer
-        Drone* closest_pursuer = NULL;
+        DubinsCar* closest_pursuer = NULL;
         float min_pursuer_dist = FLT_MAX;
-        for (int i = 1; i < env->num_agents; i++) {
-            Drone* pursuer = &env->agents[i];
+        for (int i = 0; i < env->num_agents; i++) {
+            DubinsCar* pursuer = &env->agents[i];
+            if (pursuer->is_evader) continue; // Skip other evaders
+            
             float dx = agent->pos.x - pursuer->pos.x;
             float dy = agent->pos.y - pursuer->pos.y;
-            float dz = agent->pos.z - pursuer->pos.z;
-            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+            float dist = sqrtf(dx*dx + dy*dy);
             if (dist < min_pursuer_dist) {
                 min_pursuer_dist = dist;
                 closest_pursuer = pursuer;
@@ -210,112 +177,102 @@ void set_target_pursuit_evasion(DronePE* env, int idx) {
         
         if (closest_pursuer != NULL) {
             // Set target in opposite direction from closest pursuer
-            Vec3 escape_dir = {
+            Vec2 escape_dir = {
                 agent->pos.x - closest_pursuer->pos.x,
-                agent->pos.y - closest_pursuer->pos.y,
-                agent->pos.z - closest_pursuer->pos.z
+                agent->pos.y - closest_pursuer->pos.y
             };
-            float escape_dist = sqrtf(escape_dir.x*escape_dir.x + escape_dir.y*escape_dir.y + escape_dir.z*escape_dir.z);
+            float escape_dist = sqrtf(escape_dir.x*escape_dir.x + escape_dir.y*escape_dir.y);
             if (escape_dist > 0.1f) {
                 escape_dir.x /= escape_dist;
                 escape_dir.y /= escape_dist;
-                escape_dir.z /= escape_dist;
                 
                 // Set target 5 units away in escape direction
-                agent->target_pos = (Vec3){
+                agent->target_pos = (Vec2){
                     agent->pos.x + escape_dir.x * 5.0f,
-                    agent->pos.y + escape_dir.y * 5.0f,
-                    agent->pos.z + escape_dir.z * 5.0f
+                    agent->pos.y + escape_dir.y * 5.0f
                 };
                 
                 // Clamp target to boundaries
                 agent->target_pos.x = clampf(agent->target_pos.x, -GRID_X + 1.0f, GRID_X - 1.0f);
                 agent->target_pos.y = clampf(agent->target_pos.y, -GRID_Y + 1.0f, GRID_Y - 1.0f);
-                agent->target_pos.z = clampf(agent->target_pos.z, -GRID_Z + 1.0f, GRID_Z - 1.0f);
             } else {
-                agent->target_pos = (Vec3){rndf(-MARGIN_X, MARGIN_X), rndf(-MARGIN_Y, MARGIN_Y), rndf(-MARGIN_Z, MARGIN_Z)};
+                agent->target_pos = (Vec2){rndf(-MARGIN_X, MARGIN_X), rndf(-MARGIN_Y, MARGIN_Y)};
             }
         } else {
-            agent->target_pos = (Vec3){rndf(-MARGIN_X, MARGIN_X), rndf(-MARGIN_Y, MARGIN_Y), rndf(-MARGIN_Z, MARGIN_Z)};
+            agent->target_pos = (Vec2){rndf(-MARGIN_X, MARGIN_X), rndf(-MARGIN_Y, MARGIN_Y)};
         }
-        agent->target_vel = (Vec3){0.0f, 0.0f, 0.0f};
+        agent->target_vel = (Vec2){0.0f, 0.0f};
     } else {
-        // Pursuer: target the evader's position
-        Drone* evader = &env->agents[0];
-        agent->target_pos = evader->pos;
-        agent->target_vel = (Vec3){0.0f, 0.0f, 0.0f};
+        // Pursuer: target the nearest evader's position
+        DubinsCar* nearest_evader = NULL;
+        float min_evader_dist = FLT_MAX;
+        for (int i = 0; i < env->num_agents; i++) {
+            DubinsCar* evader = &env->agents[i];
+            if (!evader->is_evader) continue; // Skip pursuers
+            
+            float dx = agent->pos.x - evader->pos.x;
+            float dy = agent->pos.y - evader->pos.y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist < min_evader_dist) {
+                min_evader_dist = dist;
+                nearest_evader = evader;
+            }
+        }
+        
+        if (nearest_evader != NULL) {
+            agent->target_pos = nearest_evader->pos;
+        } else {
+            agent->target_pos = (Vec2){0.0f, 0.0f}; // Center if no evader found
+        }
+        agent->target_vel = (Vec2){0.0f, 0.0f};
     }
 }
 
-void set_target(DronePE* env, int idx) {
+void set_target(DubinPE* env, int idx) {
     set_target_pursuit_evasion(env, idx);
 }
 
-float compute_reward(DronePE* env, Drone *agent, bool collision) {
-    float dist_reward = 0.0f;
+float compute_reward(DubinPE* env, DubinsCar *agent, bool collision) {
+    // Compute the average distance between evaders and pursuers for zero-sum reward
+    float total_distance = 0.0f;
+    int distance_count = 0;
     
-    // Find agent index
-    int agent_idx = -1;
     for (int i = 0; i < env->num_agents; i++) {
-        if (&env->agents[i] == agent) {
-            agent_idx = i;
-            break;
-        }
-    }
-    
-    if (agent_idx == 0) {
-        // Evader: reward for maximizing distance to closest pursuer
-        float min_pursuer_dist = FLT_MAX;
-        for (int i = 1; i < env->num_agents; i++) {
-            Drone* pursuer = &env->agents[i];
-            float dx = agent->pos.x - pursuer->pos.x;
-            float dy = agent->pos.y - pursuer->pos.y;
-            float dz = agent->pos.z - pursuer->pos.z;
-            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-            if (dist < min_pursuer_dist) {
-                min_pursuer_dist = dist;
+        for (int j = i + 1; j < env->num_agents; j++) {
+            DubinsCar* agent1 = &env->agents[i];
+            DubinsCar* agent2 = &env->agents[j];
+            
+            // Only count distances between evader and pursuer pairs
+            if (agent1->is_evader != agent2->is_evader) {
+                float dx = agent1->pos.x - agent2->pos.x;
+                float dy = agent1->pos.y - agent2->pos.y;
+                float dist = sqrtf(dx*dx + dy*dy);
+                total_distance += dist;
+                distance_count++;
             }
         }
-        // Normalize distance reward for evader (higher distance = higher reward)
-        dist_reward = clampf(min_pursuer_dist / 15.0f, 0.0f, 1.0f);
-    } else {
-        // Pursuer: reward for minimizing distance to evader
-        Drone* evader = &env->agents[0];
-        float dx = agent->pos.x - evader->pos.x;
-        float dy = agent->pos.y - evader->pos.y;
-        float dz = agent->pos.z - evader->pos.z;
-        float dist_to_evader = sqrtf(dx*dx + dy*dy + dz*dz);
-        // Normalize distance reward for pursuer (lower distance = higher reward)
-        dist_reward = 1.0f - clampf(dist_to_evader / 15.0f, 0.0f, 1.0f);
     }
+    
+    float avg_distance = (distance_count > 0) ? total_distance / distance_count : 0.0f;
+    float normalized_distance = clampf(avg_distance / 15.0f, 0.0f, 1.0f);
+    
+    // Zero-sum: evaders get positive reward for larger distances, pursuers get negative
+    float dist_reward = agent->is_evader ? normalized_distance : -normalized_distance;
 
-    // Collision avoidance: only penalize same-type agents getting too close
+    // Collision avoidance: penalize same-type agents getting too close
     float density_reward = 0.0f;
     if (collision && env->num_agents > 1) {
-        if (agent_idx == 0) {
-            // Evader: avoid other evaders (if multiple exist)
-            for (int i = 1; i < env->num_agents; i++) {
-                if (env->agents[i].pos.x == env->agents[0].pos.x) continue; // Skip if same as evader
-                float dx = agent->pos.x - env->agents[i].pos.x;
-                float dy = agent->pos.y - env->agents[i].pos.y;
-                float dz = agent->pos.z - env->agents[i].pos.z;
-                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-                if (dist < 2.0f && i != 0) {
-                    // Only penalize evader-evader collisions (if there were multiple evaders)
-                    // For now, this won't trigger since we only have one evader
-                }
-            }
-        } else {
-            // Pursuer: avoid other pursuers
-            for (int i = 1; i < env->num_agents; i++) {
-                if (i == agent_idx) continue; // Skip self
-                Drone* other_pursuer = &env->agents[i];
-                float dx = agent->pos.x - other_pursuer->pos.x;
-                float dy = agent->pos.y - other_pursuer->pos.y;
-                float dz = agent->pos.z - other_pursuer->pos.z;
-                float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+        for (int i = 0; i < env->num_agents; i++) {
+            if (i == (agent - env->agents)) continue; // Skip self
+            DubinsCar* other = &env->agents[i];
+            
+            // Only penalize collisions between same types
+            if (agent->is_evader == other->is_evader) {
+                float dx = agent->pos.x - other->pos.x;
+                float dy = agent->pos.y - other->pos.y;
+                float dist = sqrtf(dx*dx + dy*dy);
                 if (dist < 1.5f) {
-                    density_reward = -0.3f; // Reduced penalty for pursuer-pursuer collisions
+                    density_reward = -0.3f;
                     agent->collisions += 1.0f;
                     break; // Only count one collision per step
                 }
@@ -324,11 +281,6 @@ float compute_reward(DronePE* env, Drone *agent, bool collision) {
     }
 
     float abs_reward = dist_reward + density_reward;
-
-    // Prevent negative dist and density from making a positive reward
-    if (dist_reward < 0.0f && density_reward < 0.0f) {
-        abs_reward *= -1.0f;
-    }
 
     float delta_reward = abs_reward - agent->last_abs_reward;
 
@@ -342,33 +294,35 @@ float compute_reward(DronePE* env, Drone *agent, bool collision) {
     return delta_reward;
 }
 
-void reset_agent(DronePE* env, Drone *agent, int idx) {
+void reset_agent(DubinPE* env, DubinsCar *agent, int idx) {
     agent->episode_return = 0.0f;
     agent->episode_length = 0;
     agent->collisions = 0.0f;
     agent->score = 0.0f;
     
+    // Determine if this is an evader (first agent) or pursuer
+    bool is_evader = (idx == 0);
+    
     // Intelligent spawning with minimum distance requirements
-    Vec3 spawn_pos;
+    Vec2 spawn_pos;
     bool valid_position = false;
     int max_attempts = 50;
     int attempts = 0;
     
     while (!valid_position && attempts < max_attempts) {
-        spawn_pos = (Vec3){rndf(-8, 8), rndf(-8, 8), rndf(-8, 8)};
+        spawn_pos = (Vec2){rndf(-8, 8), rndf(-8, 8)};
         valid_position = true;
         
         // Check distance to other agents
         for (int i = 0; i < idx; i++) {
-            Drone* other = &env->agents[i];
+            DubinsCar* other = &env->agents[i];
             float dx = spawn_pos.x - other->pos.x;
             float dy = spawn_pos.y - other->pos.y;
-            float dz = spawn_pos.z - other->pos.z;
-            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+            float dist = sqrtf(dx*dx + dy*dy);
             
             // Minimum distance requirements
             float min_dist = 3.0f; // Default minimum distance
-            if (idx == 0 || i == 0) {
+            if (is_evader || env->agents[i].is_evader) {
                 // Evader-pursuer spacing should be larger
                 min_dist = 5.0f;
             } else {
@@ -386,38 +340,34 @@ void reset_agent(DronePE* env, Drone *agent, int idx) {
     
     // If we couldn't find a valid position after max attempts, use a fallback
     if (!valid_position) {
-        if (idx == 0) {
+        if (is_evader) {
             // Evader spawns in center area
-            spawn_pos = (Vec3){rndf(-2, 2), rndf(-2, 2), rndf(-2, 2)};
+            spawn_pos = (Vec2){rndf(-2, 2), rndf(-2, 2)};
         } else {
             // Pursuers spawn around the edges
             float angle = (float)(idx - 1) / (float)(env->num_agents - 1) * 2.0f * PI;
             float radius = 8.0f;
-            spawn_pos = (Vec3){
+            spawn_pos = (Vec2){
                 radius * cosf(angle) + rndf(-1, 1),
-                radius * sinf(angle) + rndf(-1, 1),
-                rndf(-8, 8)
+                radius * sinf(angle) + rndf(-1, 1)
             };
         }
     }
     
     agent->pos = spawn_pos;
     agent->spawn_pos = agent->pos;
-    agent->vel = (Vec3){0.0f, 0.0f, 0.0f};
-    agent->omega = (Vec3){0.0f, 0.0f, 0.0f};
-    agent->quat = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+    agent->heading = rndf(0, 2.0f * PI);
 
-    float size = rndf(0.1f, 0.4);
-    init_drone(agent, size, 0.1f);
+    init_dubins_car(agent, is_evader);
     compute_reward(env, agent, false); // Start without collision checking
 }
 
-void c_reset(DronePE *env) {
+void c_reset(DubinPE *env) {
     env->tick = 0;
     env->task = TASK_PURSUIT_EVASION;
 
     for (int i = 0; i < env->num_agents; i++) {
-        Drone *agent = &env->agents[i];
+        DubinsCar *agent = &env->agents[i];
         reset_agent(env, agent, i);
         set_target(env, i);
     }
@@ -425,30 +375,26 @@ void c_reset(DronePE *env) {
     compute_observations(env);
 }
 
-void c_step(DronePE *env) {
+void c_step(DubinPE *env) {
     env->tick = (env->tick + 1) % HORIZON;
     for (int i = 0; i < env->num_agents; i++) {
-        Drone *agent = &env->agents[i];
+        DubinsCar *agent = &env->agents[i];
         env->rewards[i] = 0;
         env->terminals[i] = 0;
 
-        float* atn = &env->actions[4*i];
-        move_drone(agent, atn);
+        int action = env->actions[i];
+        move_dubins_car(agent, action);
 
         // check out of bounds
         bool out_of_bounds = agent->pos.x < -GRID_X || agent->pos.x > GRID_X ||
-                             agent->pos.y < -GRID_Y || agent->pos.y > GRID_Y ||
-                             agent->pos.z < -GRID_Z || agent->pos.z > GRID_Z;
+                             agent->pos.y < -GRID_Y || agent->pos.y > GRID_Y;
 
         move_target(env, agent);
 
-        // Compute pursuit-evasion reward with appropriate collision detection
-        // Only check collisions for pursuers (to avoid each other) 
-        bool check_collisions = (i > 0); // Only pursuers need collision avoidance
-        float reward = compute_reward(env, agent, check_collisions);
+        // Compute pursuit-evasion reward with collision detection
+        float reward = compute_reward(env, agent, true);
 
         env->rewards[i] += reward;
-
         agent->episode_return += reward;
 
         if (out_of_bounds) {
@@ -473,7 +419,7 @@ void c_close_client(Client *client) {
     free(client);
 }
 
-void c_close(DronePE *env) {
+void c_close(DubinPE *env) {
     if (env->client != NULL) {
         c_close_client(env->client);
     }
@@ -529,14 +475,14 @@ void handle_camera_controls(Client *client) {
     }
 }
 
-Client *make_client(DronePE *env) {
+Client *make_client(DubinPE *env) {
     Client *client = (Client *)calloc(1, sizeof(Client));
 
     client->width = WIDTH;
     client->height = HEIGHT;
 
     SetConfigFlags(FLAG_MSAA_4X_HINT); // antialiasing
-    InitWindow(WIDTH, HEIGHT, "PufferLib DronePE");
+    InitWindow(WIDTH, HEIGHT, "PufferLib DubinPE");
 
 #ifndef __EMSCRIPTEN__
     SetTargetFPS(60);
@@ -550,7 +496,7 @@ Client *make_client(DronePE *env) {
 
     client->camera_distance = 40.0f;
     client->camera_azimuth = 0.0f;
-    client->camera_elevation = PI / 10.0f;
+    client->camera_elevation = PI / 3.0f; // Higher elevation for top-down view
     client->is_dragging = false;
     client->last_mouse_pos = (Vector2){0.0f, 0.0f};
 
@@ -579,7 +525,7 @@ const Color PUFF_CYAN = (Color){0, 187, 187, 255};
 const Color PUFF_WHITE = (Color){241, 241, 241, 241};
 const Color PUFF_BACKGROUND = (Color){6, 24, 24, 255};
 
-void c_render(DronePE *env) {
+void c_render(DubinPE *env) {
     if (env->client == NULL) {
         env->client = make_client(env);
         if (env->client == NULL) {
@@ -603,7 +549,7 @@ void c_render(DronePE *env) {
     Client *client = env->client;
 
     for (int i = 0; i < env->num_agents; i++) {
-        Drone *agent = &env->agents[i];
+        DubinsCar *agent = &env->agents[i];
         Trail *trail = &client->trails[i];
         trail->pos[trail->index] = agent->pos;
         trail->index = (trail->index + 1) % TRAIL_LENGTH;
@@ -621,65 +567,51 @@ void c_render(DronePE *env) {
 
     BeginMode3D(client->camera);
 
-    // draws bounding cube
+    // Draw ground plane
+    DrawPlane((Vector3){0.0f, 0.0f, 0.0f}, (Vector2){GRID_X * 2.0f, GRID_Y * 2.0f}, DARKGRAY);
+    
+    // Draw bounding rectangle
     DrawCubeWires((Vector3){0.0f, 0.0f, 0.0f}, GRID_X * 2.0f,
-        GRID_Y * 2.0f, GRID_Z * 2.0f, WHITE);
+        GRID_Y * 2.0f, 0.1f, WHITE);
 
     for (int i = 0; i < env->num_agents; i++) {
-        Drone *agent = &env->agents[i];
+        DubinsCar *agent = &env->agents[i];
 
-        // draws drone body with pursuit-evasion colors
-        Color body_color = PUFF_CYAN; // Default color
-        if (i == 0) {
+        // Draw car body with pursuit-evasion colors
+        Color body_color;
+        if (agent->is_evader) {
             body_color = GREEN;  // Evader is green
         } else {
             body_color = RED;    // Pursuers are red
         }
-        DrawSphere((Vector3){agent->pos.x, agent->pos.y, agent->pos.z}, 0.3f, body_color);
-
-        // draws rotors according to thrust
-        float T[4];
-        for (int j = 0; j < 4; j++) {
-            float rpm = (env->actions[4*i + j] + 1.0f) * 0.5f * agent->max_rpm;
-            T[j] = agent->k_thrust * rpm * rpm;
-        }
-
-        const float rotor_radius = 0.15f;
-        const float visual_arm_len = agent->arm_len * 4.0f;
-
-        Vec3 rotor_offsets_body[4] = {{+visual_arm_len, 0.0f, 0.0f},
-                                      {-visual_arm_len, 0.0f, 0.0f},
-                                      {0.0f, +visual_arm_len, 0.0f},
-                                      {0.0f, -visual_arm_len, 0.0f}};
-
-        Color base_colors[4] = {body_color, body_color, body_color, body_color};
-
-        for (int j = 0; j < 4; j++) {
-            Vec3 world_off = quat_rotate(agent->quat, rotor_offsets_body[j]);
-
-            Vector3 rotor_pos = {agent->pos.x + world_off.x, agent->pos.y + world_off.y,
-                                 agent->pos.z + world_off.z};
-
-            float rpm = (env->actions[4*i + j] + 1.0f) * 0.5f * agent->max_rpm;
-            float intensity = 0.75f + 0.25f * (rpm / agent->max_rpm);
-
-            Color rotor_color = (Color){(unsigned char)(base_colors[j].r * intensity),
-                                        (unsigned char)(base_colors[j].g * intensity),
-                                        (unsigned char)(base_colors[j].b * intensity), 255};
-
-            DrawSphere(rotor_pos, rotor_radius, rotor_color);
-
-            DrawCylinderEx((Vector3){agent->pos.x, agent->pos.y, agent->pos.z}, rotor_pos, 0.02f, 0.02f, 8,
-                           BLACK);
-        }
-
-        // draws line with direction and magnitude of velocity / 10
-        if (norm3(agent->vel) > 0.1f) {
-            DrawLine3D((Vector3){agent->pos.x, agent->pos.y, agent->pos.z},
-                       (Vector3){agent->pos.x + agent->vel.x * 0.1f, agent->pos.y + agent->vel.y * 0.1f,
-                                 agent->pos.z + agent->vel.z * 0.1f},
-                       MAGENTA);
-        }
+        
+        // Draw car as a cylinder (represents the car body)
+        DrawCylinder((Vector3){agent->pos.x, agent->pos.y, 0.1f}, 0.1f, 0.1f, 0.3f, 8, body_color);
+        
+        // Draw heading indicator (line showing direction)
+        float line_length = 0.7f;
+        Vector3 start = {agent->pos.x, agent->pos.y, 0.2f};
+        Vector3 end = {
+            agent->pos.x + line_length * cosf(agent->heading),
+            agent->pos.y + line_length * sinf(agent->heading),
+            0.2f
+        };
+        DrawLine3D(start, end, body_color);
+        
+        // Draw arrow head
+        float arrow_size = 0.2f;
+        Vector3 arrow_left = {
+            end.x - arrow_size * cosf(agent->heading + PI * 0.8f),
+            end.y - arrow_size * sinf(agent->heading + PI * 0.8f),
+            0.2f
+        };
+        Vector3 arrow_right = {
+            end.x - arrow_size * cosf(agent->heading - PI * 0.8f),
+            end.y - arrow_size * sinf(agent->heading - PI * 0.8f),
+            0.2f
+        };
+        DrawLine3D(end, arrow_left, body_color);
+        DrawLine3D(end, arrow_right, body_color);
 
         // Draw trailing path
         Trail *trail = &client->trails[i];
@@ -693,24 +625,24 @@ void c_render(DronePE *env) {
             
             // Different trail colors for evaders vs pursuers
             Color base_trail_color;
-            if (i == 0) {
+            if (agent->is_evader) {
                 base_trail_color = (Color){0, 255, 0, 255}; // Green for evader
             } else {
                 base_trail_color = (Color){255, 0, 0, 255}; // Red for pursuers
             }
             Color trail_color = ColorAlpha(base_trail_color, alpha);
             
-            DrawLine3D((Vector3){trail->pos[idx0].x, trail->pos[idx0].y, trail->pos[idx0].z},
-                       (Vector3){trail->pos[idx1].x, trail->pos[idx1].y, trail->pos[idx1].z},
+            DrawLine3D((Vector3){trail->pos[idx0].x, trail->pos[idx0].y, 0.05f},
+                       (Vector3){trail->pos[idx1].x, trail->pos[idx1].y, 0.05f},
                        trail_color);
         }
     }
 
     if (IsKeyDown(KEY_TAB)) {
         for (int i = 0; i < env->num_agents; i++) {
-            Drone *agent = &env->agents[i];
-            Vec3 target_pos = agent->target_pos;
-            DrawSphere((Vector3){target_pos.x, target_pos.y, target_pos.z}, 0.45f, (Color){0, 255, 255, 100});
+            DubinsCar *agent = &env->agents[i];
+            Vec2 target_pos = agent->target_pos;
+            DrawSphere((Vector3){target_pos.x, target_pos.y, 0.1f}, 0.45f, (Color){0, 255, 255, 100});
         }
     }
 
@@ -722,20 +654,33 @@ void c_render(DronePE *env) {
     
     // Show pursuit-evasion status
     if (env->num_agents > 1) {
-        Drone* evader = &env->agents[0];
-        float min_distance = FLT_MAX;
-        for (int i = 1; i < env->num_agents; i++) {
-            Drone* pursuer = &env->agents[i];
-            float dx = evader->pos.x - pursuer->pos.x;
-            float dy = evader->pos.y - pursuer->pos.y;  
-            float dz = evader->pos.z - pursuer->pos.z;
-            float dist = sqrtf(dx*dx + dy*dy + dz*dz);
-            if (dist < min_distance) {
-                min_distance = dist;
+        DubinsCar* evader = NULL;
+        // Find the evader
+        for (int i = 0; i < env->num_agents; i++) {
+            if (env->agents[i].is_evader) {
+                evader = &env->agents[i];
+                break;
             }
         }
-        DrawText(TextFormat("Closest Pursuer Distance: %.2f", min_distance), 10, 70, 16, PUFF_WHITE);
-        DrawText(TextFormat("Agents: 1 Evader (Green), %d Pursuers (Red)", env->num_agents - 1), 10, 90, 16, PUFF_WHITE);
+        
+        if (evader != NULL) {
+            float min_distance = FLT_MAX;
+            int pursuer_count = 0;
+            for (int i = 0; i < env->num_agents; i++) {
+                DubinsCar* pursuer = &env->agents[i];
+                if (!pursuer->is_evader) {
+                    pursuer_count++;
+                    float dx = evader->pos.x - pursuer->pos.x;
+                    float dy = evader->pos.y - pursuer->pos.y;  
+                    float dist = sqrtf(dx*dx + dy*dy);
+                    if (dist < min_distance) {
+                        min_distance = dist;
+                    }
+                }
+            }
+            DrawText(TextFormat("Closest Pursuer Distance: %.2f", min_distance), 10, 70, 16, PUFF_WHITE);
+            DrawText(TextFormat("Agents: 1 Evader (Green), %d Pursuers (Red)", pursuer_count), 10, 90, 16, PUFF_WHITE);
+        }
     }
 
     EndDrawing();

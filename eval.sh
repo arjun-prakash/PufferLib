@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Run eval (this will produce frame_*.png via TakeScreenshot)
-python -m pufferlib.pufferl eval puffer_drone_pe \
+python -m pufferlib.pufferl eval puffer_dubin_pe \
   --load-model-path latest \
   --gif-path dummy.gif \
   --render-mode human --save-frames 200

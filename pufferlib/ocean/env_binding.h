@@ -640,6 +640,31 @@ static double unpack(PyObject* kwargs, char* key) {
     return 1;
 }
 
+static double unpack_optional(PyObject* kwargs, char* key, double default_value) {
+    PyObject* val = PyDict_GetItemString(kwargs, key);
+    if (val == NULL) {
+        return default_value;  // Return default if key is missing
+    }
+    if (PyLong_Check(val)) {
+        long out = PyLong_AsLong(val);
+        if (out > INT_MAX || out < INT_MIN) {
+            char error_msg[100];
+            snprintf(error_msg, sizeof(error_msg), "Value %ld of integer argument %s is out of range", out, key);
+            PyErr_SetString(PyExc_TypeError, error_msg);
+            return 1;
+        }
+        // Cast on return. Safe because double can represent all 32-bit ints exactly
+        return out;
+    }
+    if (PyFloat_Check(val)) {
+        return PyFloat_AsDouble(val);
+    }
+    char error_msg[100];
+    snprintf(error_msg, sizeof(error_msg), "Failed to unpack keyword %s as int", key);
+    PyErr_SetString(PyExc_TypeError, error_msg);
+    return 1;
+}
+
 // Method table
 static PyMethodDef methods[] = {
     {"env_init", (PyCFunction)env_init, METH_VARARGS | METH_KEYWORDS, "Init environment with observation, action, reward, terminal, truncation arrays"},
