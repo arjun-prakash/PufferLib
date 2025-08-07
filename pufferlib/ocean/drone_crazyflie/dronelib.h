@@ -18,20 +18,21 @@
 #define TRAIL_LENGTH 50
 #define HORIZON 1024
 
-// Physical constants for the drone
-#define BASE_MASS 1.0f       // kg
-#define BASE_IXX 0.01f       // kgm^2
-#define BASE_IYY 0.01f       // kgm^2
-#define BASE_IZZ 0.02f       // kgm^2
-#define BASE_ARM_LEN 0.1f    // m
-#define BASE_K_THRUST 3e-5f  // thrust coefficient
-#define BASE_K_ANG_DAMP 0.2f // angular damping coefficient
-#define BASE_K_DRAG 1e-6f    // drag (torque) coefficient
-#define BASE_B_DRAG 0.1f     // linear drag coefficient
-#define BASE_GRAVITY 9.81f   // m/s^2
-#define BASE_MAX_RPM 750.0f  // rad/s
-#define BASE_MAX_VEL 50.0f   // m/s
-#define BASE_MAX_OMEGA 50.0f // rad/s
+// Physical constants for Crazyflie 2.1
+#define BASE_MASS       0.027f       // kg
+#define BASE_IXX        2.3951e-5f   // kg·m^2
+#define BASE_IYY        2.3951e-5f   // kg·m^2
+#define BASE_IZZ        3.2347e-5f   // kg·m^2
+#define BASE_ARM_LEN    0.0325f      // m (motor-to-CoM distance)
+#define BASE_K_THRUST   0.32f        // N per unit thrust command
+#define BASE_K_ANG_DAMP 0.001f       // N·m·s   (rotational damping)
+#define BASE_K_DRAG     1.5e-6f      // N·m/(rad/s)^2  (aero drag torque)
+#define BASE_B_DRAG     0.10f        // N·s/m (translational drag)
+#define BASE_GRAVITY    9.81f        // m/s^2
+#define BASE_MAX_RPM    4400.0f      // rad/s (~42 000 RPM brushless)
+#define BASE_MAX_VEL    1.00f        // m/s   (default PID xyVelMax)
+#define BASE_MAX_OMEGA  25.00f       // rad/s (~1500°/s body rate)
+
 
 // Simulation properties
 #define GRID_SIZE 10.0f
@@ -213,36 +214,36 @@ void init_drone(Drone* drone, float size, float dr) {
 
     // m ~ x^3
     float mass_scale = powf(drone->arm_len, 3.0f) / powf(BASE_ARM_LEN, 3.0f);
-    drone->mass = BASE_MASS * mass_scale * rndf(1.0f - dr, 1.0f + dr);
+    drone->mass = BASE_MASS * mass_scale; //* rndf(1.0f - dr, 1.0f + dr);
 
     // I ~ mx^2
     float base_Iscale = BASE_MASS * BASE_ARM_LEN * BASE_ARM_LEN;
     float I_scale = drone->mass * powf(drone->arm_len, 2.0f) / base_Iscale;
-    drone->ixx = BASE_IXX * I_scale * rndf(1.0f - dr, 1.0f + dr);
-    drone->iyy = BASE_IYY * I_scale * rndf(1.0f - dr, 1.0f + dr);
-    drone->izz = BASE_IZZ * I_scale * rndf(1.0f - dr, 1.0f + dr);
+    drone->ixx = BASE_IXX * I_scale; //* rndf(1.0f - dr, 1.0f + dr);
+    drone->iyy = BASE_IYY * I_scale; //* rndf(1.0f - dr, 1.0f + dr);
+    drone->izz = BASE_IZZ * I_scale; //* rndf(1.0f - dr, 1.0f + dr);
 
     // k_thrust ~ m/l
     float k_thrust_scale = (drone->mass * drone->arm_len) / (BASE_MASS * BASE_ARM_LEN);
-    drone->k_thrust = BASE_K_THRUST * k_thrust_scale * rndf(1.0f - dr, 1.0f + dr);
+    drone->k_thrust = BASE_K_THRUST * k_thrust_scale; //* rndf(1.0f - dr, 1.0f + dr);
 
     // k_ang_damp ~ I
     float base_avg_inertia = (BASE_IXX + BASE_IYY + BASE_IZZ) / 3.0f;
     float avg_inertia = (drone->ixx + drone->iyy + drone->izz) / 3.0f;
     float avg_inertia_scale = avg_inertia / base_avg_inertia;
-    drone->k_ang_damp = BASE_K_ANG_DAMP * avg_inertia_scale * rndf(1.0f - dr, 1.0f + dr);
+    drone->k_ang_damp = BASE_K_ANG_DAMP * avg_inertia_scale; //* rndf(1.0f - dr, 1.0f + dr);
 
     // drag ~ x^2
     float drag_scale = powf(drone->arm_len, 2.0f) / powf(BASE_ARM_LEN, 2.0f);
-    drone->k_drag = BASE_K_DRAG * drag_scale * rndf(1.0f - dr, 1.0f + dr);
-    drone->b_drag = BASE_B_DRAG * drag_scale * rndf(1.0f - dr, 1.0f + dr);
+    drone->k_drag = BASE_K_DRAG * drag_scale; //* rndf(1.0f - dr, 1.0f + dr);
+    drone->b_drag = BASE_B_DRAG * drag_scale; //* rndf(1.0f - dr, 1.0f + dr);
 
     // Small gravity randomization
-    drone->gravity = BASE_GRAVITY * rndf(0.99f, 1.01f);
+    drone->gravity = BASE_GRAVITY; //* rndf(0.99f, 1.01f);
 
     // RPM ~ 1/x
     float rpm_scale = (BASE_ARM_LEN) / (drone->arm_len);
-    drone->max_rpm = BASE_MAX_RPM * rpm_scale * rndf(1.0f - dr, 1.0f + dr);
+    drone->max_rpm = BASE_MAX_RPM * rpm_scale; //* rndf(1.0f - dr, 1.0f + dr);
 
     drone->max_vel = BASE_MAX_VEL;
     drone->max_omega = BASE_MAX_OMEGA;
@@ -320,4 +321,3 @@ void move_drone(Drone* drone, float* actions) {
 
     quat_normalize(&drone->quat);
 }
-
