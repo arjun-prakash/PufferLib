@@ -53,6 +53,10 @@ struct DroneCrazyflie {
 
     Drone drone;
     Client *client;
+
+    // For smoothness/stability rewards
+    float prev_actions[4];
+    Vec3 prev_vel;
 };
 
 void init(DroneCrazyflie *env) {
@@ -72,44 +76,60 @@ void add_log(DroneCrazyflie *env) {
 void compute_observations(DroneCrazyflie *env) {
     Drone *drone = &env->drone;
 
-    // Target is the origin (0, 0, 0)
-    Vec3 target_pos = {0.0f, 0.0f, 0.0f};
-    
-    Quat q_inv = quat_inverse(drone->quat);
-    Vec3 to_target = quat_rotate(q_inv, sub3(target_pos, drone->pos));
-    Vec3 linear_vel_body = quat_rotate(q_inv, drone->vel);
-    Vec3 drone_up_world = quat_rotate(drone->quat, (Vec3){0.0f, 0.0f, 1.0f});
+    // Target/setpoint (origin and zero velocity)
+    const Vec3 target_pos = (Vec3){0.0f, 0.0f, 0.0f};
+    const Vec3 target_vel = (Vec3){0.0f, 0.0f, 0.0f};
 
-    // Position relative to origin (target)
-    env->observations[0] = to_target.x / GRID_SIZE;
-    env->observations[1] = to_target.y / GRID_SIZE;
-    env->observations[2] = to_target.z / GRID_SIZE;
+    // Orientation
+    const Quat q = drone->quat; // Assumed normalized elsewhere
 
-    // Linear velocity in body frame
-    env->observations[3] = linear_vel_body.x / drone->max_vel;
-    env->observations[4] = linear_vel_body.y / drone->max_vel;
-    env->observations[5] = linear_vel_body.z / drone->max_vel;
+    // Body axes expressed in world frame (columns of rot = body->world)
+    const Vec3 ex_world = quat_rotate(q, (Vec3){1.0f, 0.0f, 0.0f});
+    const Vec3 ey_world = quat_rotate(q, (Vec3){0.0f, 1.0f, 0.0f});
+    const Vec3 ez_world = quat_rotate(q, (Vec3){0.0f, 0.0f, 1.0f});
 
-    // Angular velocity
-    env->observations[6] = drone->omega.x / drone->max_omega;
-    env->observations[7] = drone->omega.y / drone->max_omega;
-    env->observations[8] = drone->omega.z / drone->max_omega;
+    // World-frame errors relative to setpoint
+    const Vec3 pos_err_world = sub3(drone->pos, target_pos);
+    const Vec3 vel_err_world = sub3(drone->vel, target_vel);
 
-    // Drone orientation (up vector in world frame)
-    env->observations[9] = drone_up_world.x;
-    env->observations[10] = drone_up_world.y;
-    env->observations[11] = drone_up_world.z;
+    // Rotate world -> body using rot^T (dot with body axes in world)
+    const Vec3 pos_body = (Vec3){
+        dot3(ex_world, pos_err_world),
+        dot3(ey_world, pos_err_world),
+        dot3(ez_world, pos_err_world)
+    };
+    const Vec3 vel_body = (Vec3){
+        dot3(ex_world, vel_err_world),
+        dot3(ey_world, vel_err_world),
+        dot3(ez_world, vel_err_world)
+    };
 
-    // Quaternion
-    env->observations[12] = drone->quat.w;
-    env->observations[13] = drone->quat.x;
-    env->observations[14] = drone->quat.y;
-    env->observations[15] = drone->quat.z;
+    // Observation vector (18 dims) matching controller_nn.c state_array
+    // 0-2: position error in body frame
+    env->observations[0] = pos_body.x / GRID_SIZE;
+    env->observations[1] = pos_body.y / GRID_SIZE;
+    env->observations[2] = pos_body.z / GRID_SIZE;
 
-    // add some dummy observations
-    env->observations[16] = 0.0f;
-    env->observations[17] = 0.0f;
+    // 3-5: velocity in body frame
+    env->observations[3] = vel_body.x / drone->max_vel;
+    env->observations[4] = vel_body.y / drone->max_vel;
+    env->observations[5] = vel_body.z / drone->max_vel;
 
+    // 6-14: rotation matrix (row-major), rot = body->world
+    env->observations[6]  = ex_world.x; // rot.m[0][0]
+    env->observations[7]  = ey_world.x; // rot.m[0][1]
+    env->observations[8]  = ez_world.x; // rot.m[0][2]
+    env->observations[9]  = ex_world.y; // rot.m[1][0]
+    env->observations[10] = ey_world.y; // rot.m[1][1]
+    env->observations[11] = ez_world.y; // rot.m[1][2]
+    env->observations[12] = ex_world.z; // rot.m[2][0]
+    env->observations[13] = ey_world.z; // rot.m[2][1]
+    env->observations[14] = ez_world.z; // rot.m[2][2]
+
+    // 15-17: angular velocity (body rates, rad/s)
+    env->observations[15] = drone->omega.x / drone->max_omega;
+    env->observations[16] = drone->omega.y / drone->max_omega;
+    env->observations[17] = drone->omega.z / drone->max_omega;
 }
 
 void c_reset(DroneCrazyflie *env) {
@@ -131,6 +151,12 @@ void c_reset(DroneCrazyflie *env) {
     drone->vel = (Vec3){0.0f, 0.0f, 0.0f};
     drone->omega = (Vec3){0.0f, 0.0f, 0.0f};
     drone->quat = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+
+     // Initialize smoothness trackers
+     env->prev_vel = drone->vel;
+     for (int i = 0; i < 4; i++) {
+         env->prev_actions[i] = 0.0f;
+     }
     compute_observations(env);
 }
 
@@ -142,7 +168,12 @@ void c_step(DroneCrazyflie *env) {
     env->log.score = 0;
 
     Drone *drone = &env->drone;
-    move_drone(drone, env->actions);
+    // apply simple action smoothing
+    float a_sm[4];
+    for (int i = 0; i < 4; i++) {
+        a_sm[i] = 0.8f * env->prev_actions[i] + 0.2f * env->actions[i];
+    }
+    move_drone(drone, a_sm);
 
     // Check out of bounds
     bool out_of_bounds = drone->pos.x < -GRID_SIZE || drone->pos.x > GRID_SIZE ||
@@ -164,7 +195,7 @@ void c_step(DroneCrazyflie *env) {
     float velocity_magnitude = norm3(drone->vel);
     
     // Reward for being close to origin (closer = higher reward)
-    float distance_reward = expf(-distance_to_origin * 1.0f);
+    float distance_reward = expf(-distance_to_origin * 0.5f);
     
     // Reward for low velocity (encourages hovering)
     float velocity_reward = expf(-velocity_magnitude * 2.0f);
@@ -185,6 +216,10 @@ void c_step(DroneCrazyflie *env) {
     }
 
     drone->prev_pos = drone->pos;
+    env->prev_vel = drone->vel;
+    for (int i = 0; i < 4; i++) {
+        env->prev_actions[i] = env->actions[i];
+    }
 
     compute_observations(env);
 }
