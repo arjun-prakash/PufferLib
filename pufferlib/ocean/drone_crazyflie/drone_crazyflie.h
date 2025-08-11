@@ -17,6 +17,9 @@ typedef struct Client Client;
 
 #define DUMP_FRAMES 1
 #define MAX_DUMP_FRAMES 300 
+// Penalize rapid changes in control to discourage oscillations
+#define OSC_PENALTY_WEIGHT 1e-3f   // try 1e-3, then ×2/÷2
+#define GATE_K             2.0f    // how fast "near-goal" turns on
 
 struct Client {
     Camera3D camera;
@@ -53,12 +56,18 @@ struct DroneCrazyflie {
 
     Drone drone;
     Client *client;
+
+    // For penalizing control oscillations
+    float prev_actions[4];
+    bool prev_actions_initialized;
 };
 
 void init(DroneCrazyflie *env) {
     env->log = (Log){0};
     env->tick = 0;
 
+    env->prev_actions_initialized = false;
+    for (int i = 0; i < 4; i++) env->prev_actions[i] = 0.0f;
 }
 
 void add_log(DroneCrazyflie *env) {
@@ -69,48 +78,65 @@ void add_log(DroneCrazyflie *env) {
     env->log.n += 1.0f;
 }
 
+
+
+static inline void fill_rot_rows_from_quat(const Quat q, float rot_rows[9]) {
+    // body->world rotation rows in row-major order to match controller_nn.c indices [6..14]
+    // Using your existing quat_rotate:
+    const Vec3 ex = quat_rotate(q, (Vec3){1.f,0.f,0.f}); // column 0
+    const Vec3 ey = quat_rotate(q, (Vec3){0.f,1.f,0.f}); // column 1
+    const Vec3 ez = quat_rotate(q, (Vec3){0.f,0.f,1.f}); // column 2
+    // rows: [ex.x ey.x ez.x; ex.y ey.y ez.y; ex.z ey.z ez.z]
+    rot_rows[0] = ex.x; rot_rows[1] = ey.x; rot_rows[2] = ez.x;
+    rot_rows[3] = ex.y; rot_rows[4] = ey.y; rot_rows[5] = ez.y;
+    rot_rows[6] = ex.z; rot_rows[7] = ey.z; rot_rows[8] = ez.z;
+}
+
 void compute_observations(DroneCrazyflie *env) {
     Drone *drone = &env->drone;
 
-    // Target is the origin (0, 0, 0)
-    Vec3 target_pos = {0.0f, 0.0f, 0.0f};
-    
-    Quat q_inv = quat_inverse(drone->quat);
-    Vec3 to_target = quat_rotate(q_inv, sub3(target_pos, drone->pos));
-    Vec3 linear_vel_body = quat_rotate(q_inv, drone->vel);
-    Vec3 drone_up_world = quat_rotate(drone->quat, (Vec3){0.0f, 0.0f, 1.0f});
+    const Vec3 target_pos = (Vec3){0.f,0.f,0.f};
+    const Vec3 target_vel = (Vec3){0.f,0.f,0.f};
 
-    // Position relative to origin (target)
-    env->observations[0] = to_target.x / GRID_SIZE;
-    env->observations[1] = to_target.y / GRID_SIZE;
-    env->observations[2] = to_target.z / GRID_SIZE;
+    // body->world rotation from quaternion
+    float Rrows[9];
+    fill_rot_rows_from_quat(drone->quat, Rrows);
 
-    // Linear velocity in body frame
-    env->observations[3] = linear_vel_body.x / drone->max_vel;
-    env->observations[4] = linear_vel_body.y / drone->max_vel;
-    env->observations[5] = linear_vel_body.z / drone->max_vel;
+    // world-frame error (choose sign)
+    Vec3 pos_err_w = sub3(drone->pos, target_pos);
+    Vec3 vel_err_w = sub3(drone->vel, target_vel);
 
-    // Angular velocity
-    env->observations[6] = drone->omega.x / drone->max_omega;
-    env->observations[7] = drone->omega.y / drone->max_omega;
-    env->observations[8] = drone->omega.z / drone->max_omega;
+    // world->body is R^T: dot with body axes in world (columns of R)
+    const Vec3 ex = (Vec3){Rrows[0], Rrows[3], Rrows[6]};
+    const Vec3 ey = (Vec3){Rrows[1], Rrows[4], Rrows[7]};
+    const Vec3 ez = (Vec3){Rrows[2], Rrows[5], Rrows[8]};
 
-    // Drone orientation (up vector in world frame)
-    env->observations[9] = drone_up_world.x;
-    env->observations[10] = drone_up_world.y;
-    env->observations[11] = drone_up_world.z;
+    Vec3 pos_b = (Vec3){ dot3(ex, pos_err_w), dot3(ey, pos_err_w), dot3(ez, pos_err_w) };
+    Vec3 vel_b = (Vec3){ dot3(ex, vel_err_w), dot3(ey, vel_err_w), dot3(ez, vel_err_w) };
 
-    // Quaternion
-    env->observations[12] = drone->quat.w;
-    env->observations[13] = drone->quat.x;
-    env->observations[14] = drone->quat.y;
-    env->observations[15] = drone->quat.z;
+    float s_pos = 1.0f / GRID_SIZE; 
+    float s_vel = 1.0f / drone->max_vel;
+    float s_omg = 1.0f / drone->max_omega;
 
-    // add some dummy observations
-    env->observations[16] = 0.0f;
-    env->observations[17] = 0.0f;
+    // 0-2: position error in body
+    env->observations[0] = pos_b.x * s_pos;
+    env->observations[1] = pos_b.y * s_pos;
+    env->observations[2] = pos_b.z * s_pos;
 
+    // 3-5: velocity in body
+    env->observations[3] = vel_b.x * s_vel;
+    env->observations[4] = vel_b.y * s_vel;
+    env->observations[5] = vel_b.z * s_vel;
+
+    // 6-14: rotation matrix rows (body->world), firmware order
+    for (int i = 0; i < 9; ++i) env->observations[6 + i] = Rrows[i];
+
+    // 15-17: body rates
+    env->observations[15] = drone->omega.x * s_omg;
+    env->observations[16] = drone->omega.y * s_omg;
+    env->observations[17] = drone->omega.z * s_omg;
 }
+
 
 void c_reset(DroneCrazyflie *env) {
     env->tick = 0;
@@ -131,7 +157,12 @@ void c_reset(DroneCrazyflie *env) {
     drone->vel = (Vec3){0.0f, 0.0f, 0.0f};
     drone->omega = (Vec3){0.0f, 0.0f, 0.0f};
     drone->quat = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+
     compute_observations(env);
+
+    // Reset oscillation tracking at episode boundaries
+    env->prev_actions_initialized = false;
+    for (int i = 0; i < 4; i++) env->prev_actions[i] = 0.0f;
 }
 
 void c_step(DroneCrazyflie *env) {
@@ -171,6 +202,23 @@ void c_step(DroneCrazyflie *env) {
     
     // Combined reward
     float reward = distance_reward * velocity_reward * 0.1f;
+
+    // Oscillation penalty: penalize rapid changes in control actions
+    // Uses squared L2 change between consecutive action vectors
+    float osc_penalty = 0.0f;
+    if (env->prev_actions_initialized) {
+        for (int i = 0; i < 4; i++) {
+            float delta = env->actions[i] - env->prev_actions[i];
+            osc_penalty += delta * delta;
+        }
+    } else {
+        env->prev_actions_initialized = true;
+    }
+    for (int i = 0; i < 4; i++) env->prev_actions[i] = env->actions[i];
+    // Gate by proximity so approach dynamics stay aggressive
+    float gate = expf(-GATE_K * norm3(env->drone.pos));  // ~0 far, ~1 near goal
+    reward -= OSC_PENALTY_WEIGHT * gate * osc_penalty;
+    // reward -= OSC_PENALTY_WEIGHT * osc_penalty;
     
     env->rewards[0] += reward;
     env->episodic_return += reward;
